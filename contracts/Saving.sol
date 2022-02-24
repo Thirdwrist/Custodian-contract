@@ -95,7 +95,7 @@ contract Saving{
 
     //@dev This creates a ward which is then locked and appropraitely updated. 
     function createWard(
-        address payable _ward, 
+        address _ward, 
         uint256 _expiry, 
         address[] memory _subCustodians, 
         uint _subCustodianApprovalCount
