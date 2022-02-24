@@ -112,9 +112,12 @@ contract Saving{
 
         // expiry reset to the start of the day 
         uint256 _expiryStartOfDay = _setLockDate(_expiry); 
-
-        // create a new ward
-         Ward memory newWard = Ward({
+       
+         // new custodian ward
+        Custodian storage _custodian = custodians[msg.sender];
+        ++_custodian.wardCount;
+        _custodian.lockedAmount += msg.value;
+        _custodian.wards[_ward] = Ward({
              amount: msg.value,
              locked: true,
              expiry: _expiryStartOfDay, 
@@ -122,20 +125,6 @@ contract Saving{
              subCustodianApprovalCount: _subCustodianApprovalCount
 
          });
-       
-        // existing custodian
-        if(custodians[msg.sender].wardCount > 0){
-            custodians[msg.sender].wards[_ward] = newWard;
-            custodians[msg.sender].lockedAmount += newWard.amount;
-            ++custodians[msg.sender].wardCount; 
-
-        }else{
-            // new custodian
-            Custodian storage _custodian = custodians[msg.sender];
-            _custodian.wardCount = 1;
-            _custodian.lockedAmount = newWard.amount;
-            _custodian.wards[_ward] = newWard; 
-        }
 
         // new lock release date
         CustodyExpiration storage _expiration = custodyExpirations[_expiryStartOfDay];
@@ -149,13 +138,17 @@ contract Saving{
         wards[_ward][msg.sender] = true;        
 
         // emit ward created event
-        emit wardCreated(msg.sender, _ward,newWard.amount, _expiry);
+        emit wardCreated(msg.sender, _ward,msg.value, _expiry);
     }
 
     function depositIntoWard(address _ward) payable public  noValue(){
         require(wards[_ward][msg.sender], 'You do not have this address as a ward');
         require(custodians[msg.sender].wards[_ward].locked, 'This ward has to be under lock to recieve deposit');
-       
+        require(
+          custodians[msg.sender].wards[_ward].expiry >= block.timestamp + 2 days, 
+          'Can not deposit two days within lock expiry'
+        );
+        
         custodians[msg.sender].wards[_ward].amount += msg.value;
         custodians[msg.sender].lockedAmount += msg.value;
 
@@ -168,11 +161,11 @@ contract Saving{
     }
 
     function _releaseLock(address _custodian, address _ward) private {
-            Ward storage ward  = custodians[_custodian].wards[_ward];
-            redemptions[_ward] += ward.amount;
-            ward.locked = false;
-            custodians[_custodian].lockedAmount -= ward.amount;
-            ward.amount = 0;
+        Ward storage ward  = custodians[_custodian].wards[_ward];
+        redemptions[_ward] += ward.amount;
+        ward.locked = false;
+        custodians[_custodian].lockedAmount -= ward.amount;
+        ward.amount = 0;
     }
 
     //@dev get the amount locked against ward
