@@ -14,10 +14,12 @@ contract Saving{
     *   4. Add Chainlink oracle 
     *   5. A certain percent should be left after lock release 
     *   6. Store total; amount, wards, custodians and released funds in contract. 
-    *   7. 
+    *   7. Chabge format to pull over push for dispencing funds
     */
 
     using SafeMath for uint256;
+
+    mapping (address => uint256 ) redemptions;
 
     struct Ward {
         uint amount;
@@ -27,8 +29,12 @@ contract Saving{
         uint subCustodianApprovalCount;
     }
 
+    /** @TODO
+    *   Remove the amount here, the house will pay for any gas required
+    *  also since implementatiion has shifted to pull over push no gas needed to remit to wards
+    **/
+    
     struct Custodian {
-        uint amount;
         uint wardCount;
         uint lockedAmount;
         mapping(address => Ward) wards;
@@ -42,7 +48,6 @@ contract Saving{
     struct CustodyExpiration{
         LockId[] locks;
         CustodyExpirationStatus status;
-        uint256 blockId;
     }
 
     enum CustodyExpirationStatus {
@@ -77,25 +82,10 @@ contract Saving{
         ***** Modifiers ******
         *
      */    
-    modifier onlyOnExpiration(address _ward){
-        require(block.timestamp >= custodians[msg.sender].wards[_ward].expiry, 'Release date of custody not reached or passed yet' ); 
-        _;
-    }
-
-    modifier wardAmtNotEmpty(address _ward){
-        require(custodians[msg.sender].wards[_ward].amount > 0, 'There is nothing to send to the ward');
-        _;
-    }
-
     modifier wardExists(address _ward)
     {   
         require(!wards[_ward][msg.sender], 'Ward exists already');
         _;
-    }
-
-    modifier wardNotExist(address _ward) {
-         require(wards[_ward][msg.sender] !=true, 'Ward does not exist');
-         _;
     }
 
     modifier noValue(){
@@ -103,7 +93,7 @@ contract Saving{
         _;
     }
 
-    //@dev This creates a ward which is then locked add appropraite updated. 
+    //@dev This creates a ward which is then locked and appropraitely updated. 
     function createWard(
         address payable _ward, 
         uint256 _expiry, 
@@ -116,7 +106,7 @@ contract Saving{
             'Custodian approval should be equal or lower than available custodians'
         );
         require(
-            _expiry > (uint256(86400).mul(7).add(block.timestamp)), 
+            _expiry >= 1 weeks, 
             'The expiry date must be more than 7 days in the future, if not the funds will be locked forever'
         );
 
@@ -142,34 +132,18 @@ contract Saving{
         }else{
             // new custodian
             Custodian storage _custodian = custodians[msg.sender];
-            _custodian.amount = 0;
             _custodian.wardCount = 1;
             _custodian.lockedAmount = newWard.amount;
             _custodian.wards[_ward] = newWard; 
         }
 
-        // add to ExpirationlockedIds
-        uint256 lockIdKey = _setLockDate(_expiry);
-        LockId memory _lockId = LockId({
+        // new lock release date
+        CustodyExpiration storage _expiration = custodyExpirations[_expiryStartOfDay];
+        _expiration.status = CustodyExpirationStatus.Pending;
+        _expiration.locks.push(LockId({
             custodian: msg.sender,
             ward: _ward
-        });
-
-        // existing lock release date
-        if(custodyExpirations[lockIdKey].status == CustodyExpirationStatus.Pending)
-        {
-            custodyExpirations[lockIdKey].locks.push(_lockId);
-        }
-        else{
-
-            // new lock release date
-            CustodyExpiration storage _expiration = custodyExpirations[lockIdKey];
-            _expiration.status = CustodyExpirationStatus.Pending;
-            _expiration.locks.push(LockId({
-               custodian: msg.sender,
-               ward: _ward
-            }));
-        }
+        }));
 
         // matching wards to thier custodians for ease
         wards[_ward][msg.sender] = true;        
@@ -179,8 +153,12 @@ contract Saving{
     }
 
     function depositIntoWard(address _ward) payable public  noValue(){
-        require(wards[_ward][msg.sender]== true, 'You do not have this address as a ward');
+        require(wards[_ward][msg.sender], 'You do not have this address as a ward');
+        require(custodians[msg.sender].wards[_ward].locked, 'This ward has to be under lock to recieve deposit');
+       
         custodians[msg.sender].wards[_ward].amount += msg.value;
+        custodians[msg.sender].lockedAmount += msg.value;
+
         emit deposit(_ward, 'ward', msg.value);
     }
     //@dev This function makes sure that the expiry date is at the begining of the day
@@ -189,33 +167,27 @@ contract Saving{
         expiry = expiry !=0 ? _expiry.sub(expiry): expiry;
     }
 
+    function _releaseLock(address _custodian, address _ward) private {
+            Ward storage ward  = custodians[_custodian].wards[_ward];
+            redemptions[_ward] += ward.amount;
+            ward.locked = false;
+            custodians[_custodian].lockedAmount -= ward.amount;
+            ward.amount = 0;
+    }
+
     //@dev get the amount locked against ward
-    function getBalanceAsCus(address _ward) public view returns(uint256){
-        require(wards[_ward][msg.sender], 'This is address is not your ward');
-        return custodians[msg.sender].wards[_ward].amount;
+    function getBalanceOfWard(address _ward, address _custodian) public view returns(uint256){
+        require(wards[_ward][_custodian], 'This match does not exist');
+        return custodians[_custodian].wards[_ward].amount;
     }
 
-    //@dev ward can check the amount locked against his name
-    function getBalanceAsWard(address _custodian) public view returns(uint256){
-        require(wards[msg.sender][_custodian], 'This address is not one of your Custodians');
-        return custodians[_custodian].wards[msg.sender].amount;
-    }
-
-    //@dev function that is hit by a keeper to Release the fund to the ward at the expiry 
-    //@dev time specified at lock, also a certian percent should be sent to a wallet for housekeeping, (1%)
-    function releaseLock()  public {
-
-    }
-
-    function getCusBalance() public view returns(uint){
-        return custodians[msg.sender].amount;
-    }
-
-    function getCusWardCount() public view returns(uint){
+    function getCustodianWardCount(address _custodian) public view returns(uint){
+        require(custodians[_custodian].wardCount > 0, 'This custodian does not exist');
         return custodians[msg.sender].wardCount;
     }
 
-    function getCusLockedAmount() public view returns(uint){
+    function getCusLockedAmount(address _custodian) public view returns(uint){
+        require(custodians[_custodian].wardCount > 0, 'This custodian does not exist');
         return custodians[msg.sender].lockedAmount;
     }
 
@@ -223,16 +195,17 @@ contract Saving{
     {
         return address(this).balance;
     }
-
-    function getWardBalance(address _ward) public wardNotExist(_ward) view returns(uint256)
-    {
-        return custodians[msg.sender].wards[_ward].amount;
-    }
     
     function getLockForToday() view public returns(uint)
     {
        uint256 _expiration=  _setLockDate(block.timestamp);
        return custodyExpirations[_expiration].locks.length;
+    }
+
+    //@dev function that is hit by a keeper to Release the fund to the ward at the expiry 
+    //@dev time specified at lock, also a certian percent should be sent to a wallet for housekeeping, (1%)
+    function releaseLock()  public {
+
     }
 
 }
