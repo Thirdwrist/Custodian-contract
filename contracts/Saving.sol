@@ -2,8 +2,13 @@
 
 pragma solidity >=0.4.22 <0.9.0;
 
+interface KeeperCompatibleInterface {
+  function checkUpkeep(bytes calldata checkData) external returns (bool upkeepNeeded, bytes memory performData);
+  function performUpkeep(bytes calldata performData) external;
+}
+
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-contract Saving{  
+contract Saving is KeeperCompatibleInterface{  
 
     /**
     *TODO
@@ -110,10 +115,8 @@ contract Saving{
             'The expiry date must be more than 7 days in the future, if not the funds will be locked forever'
         );
 
-        // expiry reset to the start of the day 
         uint256 _expiryStartOfDay = _setLockDate(_expiry); 
        
-         // new custodian ward
         Custodian storage _custodian = custodians[msg.sender];
         ++_custodian.wardCount;
         _custodian.lockedAmount += msg.value;
@@ -126,18 +129,14 @@ contract Saving{
 
          });
 
-        // new lock release date
         CustodyExpiration storage _expiration = custodyExpirations[_expiryStartOfDay];
         _expiration.status = CustodyExpirationStatus.Pending;
         _expiration.locks.push(LockId({
             custodian: msg.sender,
             ward: _ward
         }));
-
-        // matching wards to thier custodians for ease
-        wards[_ward][msg.sender] = true;        
-
-        // emit ward created event
+        wards[_ward][msg.sender] = true;  
+              
         emit wardCreated(msg.sender, _ward,msg.value, _expiry);
     }
 
@@ -158,14 +157,6 @@ contract Saving{
     function _setLockDate(uint256 _expiry) private pure returns (uint256 expiry){
         expiry = _expiry.mod(36400);
         expiry = expiry !=0 ? _expiry.sub(expiry): expiry;
-    }
-
-    function _releaseLock(address _custodian, address _ward) private {
-        Ward storage ward  = custodians[_custodian].wards[_ward];
-        redemptions[_ward] += ward.amount;
-        ward.locked = false;
-        custodians[_custodian].lockedAmount -= ward.amount;
-        ward.amount = 0;
     }
 
     //@dev get the amount locked against ward
@@ -200,5 +191,35 @@ contract Saving{
     function releaseLock()  public {
 
     }
+     function checkUpkeep(bytes calldata /* checkData */) view external override returns (bool upkeepNeeded, bytes memory  performData ) {
+        uint date = getLockForToday();
+        if(
+            custodyExpirations[date].locks.length > 0 && 
+            custodyExpirations[date].status == CustodyExpirationStatus.Pending
+            )
+        {
+            return (true,  performData);
+        }
+        
+        return (false, performData);
+    }
 
+    function performUpkeep(bytes calldata /* performData */) external override {
+        uint256 date = getLockForToday();
+        CustodyExpiration storage custody = custodyExpirations[date];
+        
+        require( custody.status == CustodyExpirationStatus.Pending, 'This addresses have been redeemed already');
+        custody.status = CustodyExpirationStatus.Executed;
+        for (uint256 index = 0; index < custody.locks.length; index++) {
+            _releaseLock(custody.locks[index].custodian, custody.locks[index].ward);
+        }
+    }
+
+    function _releaseLock(address _custodian, address _ward) private {
+        Ward storage ward  = custodians[_custodian].wards[_ward];
+        redemptions[_ward] += ward.amount;
+        ward.locked = false;
+        custodians[_custodian].lockedAmount -= ward.amount;
+        ward.amount = 0;
+    }
 }
